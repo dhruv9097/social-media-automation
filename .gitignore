@@ -1,0 +1,18 @@
+# Environments
+.env
+.env.*
+social-manager-ui/.env.local
+social-manager-ui/.env
+
+# Python
+__pycache__/
+*.pyc
+env/
+venv/
+
+# Next.js / Node
+social-manager-ui/node_modules/
+social-manager-ui/.next/
+
+# Data (Optional: keeps your repo lightweight and prevents pushing mock/live data)
+data/*.json
