@@ -1,165 +1,285 @@
+"""
+architect_agent.py v2.1 — Content Creation Engine
+
+Place at: mic-growth-engine/agents/architect_agent.py
+
+FIXES in v2.1:
+  - Phase 5 now ALWAYS generates drafts, even when Phase 1-2 data is missing.
+  - Falls back to trend data from Phase 4 when no intel data exists.
+  - Trend-based drafts are now a primary output, not a fallback.
+  - Competitor response drafts skip gracefully if no intel data.
+"""
+
 import os
 import json
+import time
 from datetime import datetime
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+from agents.gemini_utils import gemini_with_retry
 
 load_dotenv()
+
 
 class ArchitectAgent:
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("[FAIL] GEMINI_API_KEY is missing from your .env file.")
+            raise ValueError("[FAIL] GEMINI_API_KEY missing from .env")
         self.client = genai.Client(api_key=api_key)
 
-        self.today = datetime.now().strftime("%Y-%m-%d")
-
+        self.today       = datetime.now().strftime("%Y-%m-%d")
         self.intel_file  = f"data/raw_tweets_{self.today}.json"
         self.report_file = f"data/competitor_report_{self.today}.json"
+        self.trend_file  = f"data/trend_analysis_{self.today}.json"
         self.drafts_file = f"data/drafts_{self.today}.json"
 
-        self.heavy_model = "gemini-2.5-flash"
-        self.fast_model  = "gemini-2.5-flash"
+        self.brand_voice      = self._load_brand_voice()
+        self.brand_prompt_block = self._build_brand_prompt_block()
 
-    def _load_json(self, filepath):
-        if not os.path.exists(filepath):
-            print(f"[WARN] File not found, skipping: {filepath}")
-            return None
-        with open(filepath, "r") as f:
-            return json.load(f)
+    def _load_brand_voice(self):
+        try:
+            with open("config/brand_voice.json", "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            print("[WARN] brand_voice.json not found.")
+            return {}
 
+    def _build_brand_prompt_block(self):
+        bv       = self.brand_voice
+        name     = bv.get("brand_name", "MIC")
+        niche    = bv.get("niche", "audio technology")
+        audience = bv.get("target_audience", "podcasters and creators")
+        tone_adj = ", ".join(bv.get("tone", {}).get("adjectives", ["direct", "technical"]))
+        style    = bv.get("tone", {}).get("writing_style", "")
+        never_do = "\n  - ".join(bv.get("tone", {}).get("never_do", []))
+        examples = "\n".join(f'  "{e}"' for e in bv.get("example_posts", [])[:3])
+        hooks    = "\n  - ".join(bv.get("hook_styles", []))
+
+        return f"""
+BRAND: {name}
+NICHE: {niche}
+AUDIENCE: {audience}
+VOICE: {tone_adj}
+WRITING STYLE: {style}
+
+VOICE EXAMPLES (match this tone exactly):
+{examples}
+
+HOOK STYLES TO USE:
+  - {hooks}
+
+NEVER DO:
+  - {never_do}
+"""
+
+    # ─────────────────────────────────────────────────────
+    # MAIN RUN
+    # ─────────────────────────────────────────────────────
     def run(self):
-        print("[ARCHITECT] Architect Agent active. Processing intelligence feeds...")
+        print("[ARCHITECT] Architect Agent active.")
         drafts = []
 
-        # Phase 1: Gap Analysis -> Hero Thread
         report_data = self._load_json(self.report_file)
-        if report_data and "content_gaps" in report_data:
+        intel_data  = self._load_json(self.intel_file)
+        trend_data  = self._load_json(self.trend_file)
+
+        has_intel  = bool(intel_data and len(intel_data) > 0)
+        has_report = bool(report_data and report_data.get("content_gaps"))
+        has_trends = bool(trend_data and trend_data.get("approved"))
+
+        if not has_intel and not has_report and not has_trends:
+            print("[ARCHITECT] No data from any phase. Nothing to draft.")
+            self._save_drafts([])
+            return []
+
+        # ── 1. GAP-BASED HERO THREAD ──────────────────────
+        # (requires Phase 2 report)
+        if has_report:
             gaps = report_data["content_gaps"]
-            if gaps and "No obvious" not in gaps and "not found" not in gaps:
-                print("[ARCHITECT] Gap Analysis found. Drafting Hero Thread...")
+            print("[ARCHITECT] Drafting Hero Thread from content gaps...")
+            try:
+                draft = self._draft_gap_thread(gaps)
+                drafts.append(self._package("GAP_HERO", "Competitor_Audience", "Thread", draft,
+                    "Generated from 7-day competitor gap analysis"))
+                print("[OK] Hero Thread drafted.")
+                time.sleep(2)
+            except Exception as e:
+                print(f"[FAIL] Gap Thread: {e}")
+
+        # ── 2. AUDIENCE QUESTION REPLIES ──────────────────
+        # (requires Phase 2 report)
+        if has_report and report_data.get("audience_questions"):
+            for q in report_data["audience_questions"][:3]:
                 try:
-                    gap_draft = self._draft_gap_thread(gaps)
-                    drafts.append({
-                        "source_tweet_id": "GAP_ANALYSIS_HERO",
-                        "source_author":   "Competitor_Audience",
-                        "intent":          "Thread",
-                        "draft_content":   gap_draft,
-                    })
-                    print("[OK] Drafted Hero Thread from Competitor Gaps.")
+                    draft = self._draft_audience_reply(q["question"], q.get("post_text", ""))
+                    drafts.append(self._package(
+                        q.get("post_text", "")[:50], "Audience", "Reply", draft,
+                        f"Audience question ({q.get('likes', 0)} likes)"))
+                    print(f"[OK] Reply: {q['question'][:60]}...")
+                    time.sleep(2)
                 except Exception as e:
-                    print(f"[FAIL] Error drafting Gap Thread: {type(e).__name__}: {e}")
-            else:
-                print("[INFO] Gap analysis present but no actionable gaps found.")
-        else:
-            print("[INFO] No competitor report found. Skipping Gap Analysis phase.")
+                    print(f"[FAIL] Audience reply: {e}")
 
-        # Phase 2: Trends & Opportunities -> Replies / Threads
-        intel_data = self._load_json(self.intel_file)
-        if intel_data:
-            print(f"[ARCHITECT] Processing {len(intel_data)} intel items...")
-            for item in intel_data:
-                tweet_type = item.get("type")
-                raw_text   = item.get("text")
-                author     = item.get("author", "unknown")
+        # ── 3. OPPORTUNITY THREAD ─────────────────────────
+        # (requires Phase 2 report)
+        if has_report and report_data.get("our_opportunities"):
+            try:
+                draft = self._draft_opportunity_thread(report_data["our_opportunities"])
+                drafts.append(self._package("OPPORTUNITY", "Market_Analysis", "Thread", draft,
+                    "Proactive content from weekly opportunity analysis"))
+                print("[OK] Opportunity Thread drafted.")
+                time.sleep(2)
+            except Exception as e:
+                print(f"[FAIL] Opportunity Thread: {e}")
 
+        # ── 4. COMPETITOR RESPONSE DRAFTS ─────────────────
+        # (requires Phase 1 intel)
+        if has_intel:
+            top_posts = sorted(intel_data,
+                key=lambda t: t.get("likes", 0) + t.get("retweets", 0) * 2,
+                reverse=True)[:2]
+            print(f"[ARCHITECT] Drafting competitor responses for top {len(top_posts)} posts...")
+            for post in top_posts:
                 try:
-                    if tweet_type == "TREND_ALERT":
-                        draft      = self._draft_thread(raw_text)
-                        draft_type = "Thread"
-                    elif tweet_type == "OPPORTUNITY":
-                        draft      = self._draft_reply(raw_text)
-                        draft_type = "Reply"
-                    else:
-                        print(f"[WARN] Unknown intel type '{tweet_type}' for @{author} -- skipping.")
-                        continue
-
-                    drafts.append({
-                        "source_tweet_id": item.get("id"),
-                        "source_author":   author,
-                        "intent":          draft_type,
-                        "draft_content":   draft,
-                    })
-                    print(f"[OK] Drafted {draft_type} from @{author}'s tweet.")
-
+                    draft = self._draft_competitor_response(post["text"], post["author"])
+                    drafts.append(self._package(post["id"], post["author"], "Competitor_Response", draft,
+                        f"Response to @{post['author']}: {post['text'][:80]}..."))
+                    print(f"[OK] Competitor response for @{post['author']}.")
+                    time.sleep(2)
                 except Exception as e:
-                    print(f"[FAIL] Error generating content for tweet {item.get('id')}: {type(e).__name__}: {e}")
-        else:
-            print("[INFO] No raw tweet intel found. Skipping trends phase.")
+                    print(f"[FAIL] Competitor response: {e}")
+
+        # ── 5. IMAGE BRIEFS ───────────────────────────────
+        # (requires Phase 2 report)
+        if has_report and report_data.get("image_post_briefs"):
+            for img_post in report_data["image_post_briefs"][:1]:
+                try:
+                    brief = self._draft_image_brief(img_post.get("text", ""), img_post.get("author", ""))
+                    drafts.append(self._package(
+                        img_post["id"], img_post["author"], "Image_Brief", brief,
+                        f"Image post brief based on @{img_post['author']}'s visual post"))
+                    print("[OK] Image post brief generated.")
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"[FAIL] Image brief: {e}")
+
+        # ── 6. TREND-BASED CONTENT ────────────────────────
+        # ✅ FIXED: Now always runs if trend data exists (Phase 4).
+        # Previously only ran when intel data existed too — that was the bug.
+        if has_trends:
+            approved_trends = trend_data["approved"]
+            print(f"[ARCHITECT] Drafting content from {len(approved_trends)} approved trends...")
+
+            for trend in approved_trends[:4]:  # Top 4 trends max
+                try:
+                    # If trend already has a draft from Phase 4, upgrade it into a full thread
+                    existing_hook = trend.get("hook", "")
+                    existing_angle = trend.get("angle", "")
+                    topic = trend.get("topic", "")
+
+                    draft = self._draft_trend_thread(topic, existing_angle, existing_hook)
+                    drafts.append(self._package(
+                        f"trend_{topic[:20]}", "Trend_Engine", "Thread", draft,
+                        f"Trend hijack: #{topic} (score {trend.get('score', '?')}/10)"))
+                    print(f"[OK] Trend Thread: #{topic}")
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"[FAIL] Trend Thread #{trend.get('topic', '?')}: {e}")
 
         self._save_drafts(drafts)
         return drafts
 
+    # ─────────────────────────────────────────────────────
+    # DRAFT METHODS
+    # ─────────────────────────────────────────────────────
     def _draft_gap_thread(self, gaps_context):
-        system_prompt = """
-        You are an elite Twitter strategist for an audio/tech influencer.
-        The data provided contains questions our competitors failed to answer.
-        Pitch a 'Suggested Twitter Post' (a thread) to fill this gap.
+        system = f"{self.brand_prompt_block}\nWrite a Twitter thread filling a content gap competitors missed.\nFormat:\nHOOK: [First tweet — bold claim or myth-bust. Standalone.]\n---\nTWEET 2: [Technical breakdown with specs or numbers.]\n---\nTWEET 3: [Practical action for the reader.]\n---\nTWEET 4: [Strong opinion or prediction.]"
+        return gemini_with_retry(self.client, lambda model: self.client.models.generate_content(
+            model=model, contents=f"Content gap:\n{gaps_context}",
+            config=types.GenerateContentConfig(system_instruction=system, temperature=0.7)
+        ).text.strip())
 
-        Format your exact response like this:
-        STRATEGY: [1 sentence explaining why this topic will steal the competitor's audience]
-        HOOK: [The punchy first tweet. Under 2 lines. No emojis.]
-        DRAFT: 
-        [Tweet 2: The technical breakdown]
-        ---
-        [Tweet 3: The actionable takeaway]
-        """
-        response = self.client.models.generate_content(
-            model=self.heavy_model,
-            contents=f"Competitor Gaps: {gaps_context}",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.7),
-        )
-        return response.text.strip()
+    def _draft_audience_reply(self, question, post_context):
+        system = f"{self.brand_prompt_block}\nWrite a reply under 280 chars that answers the question directly in the first sentence. Include a specific spec or product name. No 'Great question!' openers."
+        return gemini_with_retry(self.client, lambda model: self.client.models.generate_content(
+            model=model, contents=f"Context: {post_context}\nQuestion: {question}",
+            config=types.GenerateContentConfig(system_instruction=system, temperature=0.4)
+        ).text.strip())
 
-    def _draft_thread(self, topic_context):
-        system_prompt = """
-        You are an elite Twitter strategist for an audio/tech influencer.
-        Pitch a 'Suggested Twitter Post' based on the provided trending topic.
+    def _draft_opportunity_thread(self, opportunities_context):
+        system = f"{self.brand_prompt_block}\nCreate a proactive Twitter thread positioning us as the leading voice in audio technology.\nFormat:\nHOOK: [Bold opening.]\n---\nTWEET 2: [Technical breakdown.]\n---\nTWEET 3: [Practical takeaway.]\n---\nTWEET 4: [Our strong opinion.]"
+        return gemini_with_retry(self.client, lambda model: self.client.models.generate_content(
+            model=model, contents=f"Opportunities:\n{opportunities_context}",
+            config=types.GenerateContentConfig(system_instruction=system, temperature=0.7)
+        ).text.strip())
 
-        Format your exact response like this:
-        ANGLE: [1 sentence explaining why we should post about this trend today]
-        HOOK: [The highly engaging first tweet. Under 2 lines.]
-        DRAFT:
-        [Tweet 2: The value/technical explanation]
-        ---
-        [Tweet 3: The final verdict]
-        """
-        response = self.client.models.generate_content(
-            model=self.heavy_model,
-            contents=f"Trending Context: {topic_context}",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.7),
-        )
-        return response.text.strip()
+    def _draft_competitor_response(self, competitor_tweet, competitor_account):
+        system = f"{self.brand_prompt_block}\nWrite a reply under 280 chars that adds technical insight the competitor missed. Respectfully disagrees or expands. No emojis. No 'Great point!' openers."
+        return gemini_with_retry(self.client, lambda model: self.client.models.generate_content(
+            model=model, contents=f"@{competitor_account} posted: {competitor_tweet}",
+            config=types.GenerateContentConfig(system_instruction=system, temperature=0.6)
+        ).text.strip())
 
-    def _draft_reply(self, question_context):
-        system_prompt = """
-        You are an elite audio tech expert replying to a user's question on Twitter.
-        Rules:
-        - Answer the question directly in the first sentence.
-        - Keep it under 280 characters.
-        - Tone: Helpful but highly authoritative.
-        - No hashtags. No generic greetings. Just the raw answer.
-        """
-        response = self.client.models.generate_content(
-            model=self.fast_model,
-            contents=f"User's Question: {question_context}",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.4),
-        )
-        return response.text.strip()
+    def _draft_image_brief(self, competitor_post_text, competitor_account):
+        system = f"{self.brand_prompt_block}\nCreate an IMAGE POST BRIEF for our design team.\nFormat:\nCONCEPT: [One sentence]\nHEADLINE TEXT: [Under 8 words, punchy]\nDATA POINTS: [3-5 bullets of specs/facts]\nVISUAL DIRECTION: [Colors, layout, style]\nCAPTION TWEET: [Under 200 chars, no hashtags]\nENGAGEMENT HOOK: [One question to drive replies]"
+        return gemini_with_retry(self.client, lambda model: self.client.models.generate_content(
+            model=model, contents=f"@{competitor_account} posted: {competitor_post_text}",
+            config=types.GenerateContentConfig(system_instruction=system, temperature=0.6)
+        ).text.strip())
+
+    def _draft_trend_thread(self, topic, angle, hook):
+        """Draft a full polished thread from an approved trend."""
+        system = f"""
+{self.brand_prompt_block}
+
+A trending topic has been identified as highly relevant to our niche.
+Write a complete Twitter thread that uses this trend to showcase our expertise.
+
+Rules:
+- First tweet MUST reference the trend directly in the first line
+- Pivot naturally to audio/creator technical insight in tweet 2
+- End with a strong opinion or surprising fact
+- Format:
+HOOK: [First tweet — references the trend + pivots to audio insight]
+---
+TWEET 2: [Technical breakdown with specs, numbers, or product names]
+---
+TWEET 3: [Practical takeaway for podcasters/creators]
+"""
+        content = f"Trending topic: {topic}\nCreative angle: {angle}\nSuggested hook: {hook}"
+        return gemini_with_retry(self.client, lambda model: self.client.models.generate_content(
+            model=model, contents=content,
+            config=types.GenerateContentConfig(system_instruction=system, temperature=0.8)
+        ).text.strip())
+
+    # ─────────────────────────────────────────────────────
+    # HELPERS
+    # ─────────────────────────────────────────────────────
+    def _package(self, source_id, author, intent, content, source_note=""):
+        return {
+            "generated_at":  datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "source_id":     source_id,
+            "source_author": author,
+            "intent":        intent,
+            "source_note":   source_note,
+            "draft_content": content,
+            "status":        "pending_review",
+        }
+
+    def _load_json(self, filepath):
+        if not os.path.exists(filepath):
+            return None
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
 
     def _save_drafts(self, drafts):
-        os.makedirs(os.path.dirname(self.drafts_file), exist_ok=True)
-        with open(self.drafts_file, "w") as f:
-            json.dump(drafts, f, indent=4)
-
-        if drafts:
-            print(f"[SAVED] {len(drafts)} draft(s) -> {self.drafts_file}")
-        else:
-            print(f"[SAVED] No drafts generated. Empty file written -> {self.drafts_file}")
+        os.makedirs("data", exist_ok=True)
+        with open(self.drafts_file, "w", encoding="utf-8") as f:
+            json.dump(drafts, f, indent=4, ensure_ascii=False)
+        print(f"[SAVED] {len(drafts)} draft(s) → {self.drafts_file}")
 
 
 if __name__ == "__main__":
-    architect = ArchitectAgent()
-    architect.run()
+    ArchitectAgent().run()

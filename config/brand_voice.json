@@ -1,0 +1,75 @@
+{
+  "brand_name": "MIC",
+  "niche": "Audio technology, podcast equipment, studio setup, creator tools",
+  "target_audience": "Podcasters, musicians, streamers, content creators, audio engineers, home studio owners",
+
+  "tone": {
+    "adjectives": ["authoritative", "technical", "direct", "no-fluff", "honest"],
+    "writing_style": "Bold claims backed by data and specs. No hype without substance. Teach first, sell never.",
+    "personality": "The most knowledgeable person in the room who does not need to show off. Confident but never arrogant.",
+    "never_do": [
+      "corporate speak or marketing language",
+      "more than 2 hashtags per post",
+      "vague advice like 'get a good mic' without specifics",
+      "recommend gear without explaining the technical reason",
+      "use emojis in serious technical posts",
+      "start a post with 'I' or 'We'",
+      "use exclamation points excessively"
+    ]
+  },
+
+  "content_pillars": [
+    "Gear deep-dives and honest spec-based reviews",
+    "Audio signal chain explained simply",
+    "Studio and home recording setup guides",
+    "Creator workflow and productivity",
+    "Myth-busting common audio mistakes",
+    "Budget vs premium gear — real-world comparisons"
+  ],
+
+  "hook_styles": [
+    "Bold technical claim that challenges conventional wisdom",
+    "Myth-busting opener: 'Stop doing X. Here is why.'",
+    "Spec comparison: '$50 mic vs $500 mic — the actual measurable difference'",
+    "Revealing question: 'Why does your podcast sound amateur? Here is the real answer.'",
+    "Contrarian take: 'Everyone tells you to buy X. They are wrong.'"
+  ],
+
+  "example_posts": [
+    "The SM7B is not a beginner mic. It needs 60dB of clean gain. Most interfaces top out at 56dB. You will clip before you record a single word. Get a Cloudlifter first or pick a different mic entirely.",
+    "32-bit float recording does not mean better audio. It means you cannot clip during tracking. Your downstream converters still define the noise floor. Do not buy it for the spec — buy it for the safety net.",
+    "Room treatment beats mic upgrades every time. A $100 mic in a treated room sounds better than a $2000 mic in an untreated room. Fix the room. Then upgrade the mic.",
+    "Your USB mic is not the problem. Your room is. Spend $30 on acoustic foam before you spend $300 on a new microphone.",
+    "Dynamic range and frequency response are two different specs. Most podcasters confuse them. One tells you how loud you can go. The other tells you what you can hear. Both matter for different reasons."
+  ],
+
+  "competitor_accounts": [
+    "podcastage",
+    "therecordingrevolution",
+    "indiepodcaster",
+    "podcastengineer"
+  ],
+
+  "trend_score_threshold": 7,
+
+  "post_formats": {
+    "thread": {
+      "min_tweets": 3,
+      "max_tweets": 7,
+      "hook_rule": "First tweet must standalone. Reader should want to click without context.",
+      "ending_rule": "Last tweet should be an actionable takeaway or strong opinion."
+    },
+    "single_tweet": {
+      "max_chars": 280,
+      "rule": "One idea. One sentence hook. One supporting fact. Done."
+    },
+    "reply": {
+      "max_chars": 280,
+      "rule": "Answer the question in the first 10 words. Expand only if essential."
+    },
+    "image_post": {
+      "rule": "Headline at top. 3-5 bullet points of data. Brand name at bottom. No stock photos.",
+      "preferred_style": "Dark background, white text, minimal design — data over decoration."
+    }
+  }
+}

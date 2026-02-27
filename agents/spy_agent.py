@@ -1,200 +1,249 @@
+"""
+spy_agent.py v2.1 — Competitor Intelligence Gatherer
+
+Place at: mic-growth-engine/agents/spy_agent.py
+
+FIXES in v2.1:
+  - Correct actor: apidojo~tweet-scraper (was twitter-scraper-lite → 403)
+  - Correct input: twitterHandles + sort (was searchTerms + queryType)
+  - Increased timeout: 120s (was 60s — too short for this actor)
+  - Reply scraper also updated to correct actor + conversationIds field
+"""
+
 import os
 import json
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 
-ACTOR_ID              = "apidojo/twitter-scraper-lite"  # Twitter Scraper Unlimited: event-based pricing, ~$0.05/50 tweets
-TREND_ALERT_LIKES     = 10
-TREND_ALERT_REPLIES   = 3
-
-# ── Mock data: realistic podcast/audio niche tweets ──────────────────────────
-MOCK_INTEL = [
-    {
-        "id": "mock_001",
-        "url": "https://x.com/PodGearNerd/status/mock_001",
-        "author": "PodGearNerd",
-        "text": "The Rode Wireless Pro just destroyed my Sennheiser G4 setup. 32-bit float internal recording means I literally cannot clip on location. Game over for traditional wireless.",
-        "metrics": {"likes": 312, "replies": 47},
-        "type": "TREND_ALERT",
-        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    },
-    {
-        "id": "mock_002",
-        "url": "https://x.com/StudioTalkDaily/status/mock_002",
-        "author": "StudioTalkDaily",
-        "text": "Hot take: The SM7B is massively overrated for beginners. You need a clean preamp with 60dB of gain to make it shine — most interfaces can't deliver that. Fight me.",
-        "metrics": {"likes": 891, "replies": 203},
-        "type": "TREND_ALERT",
-        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    },
-    {
-        "id": "mock_003",
-        "url": "https://x.com/NewPodcasterJen/status/mock_003",
-        "author": "NewPodcasterJen",
-        "text": "Does the best podcast mic under $200 actually exist or is it all marketing? Every review says something different and I'm losing my mind trying to decide.",
-        "metrics": {"likes": 4, "replies": 2},
-        "type": "OPPORTUNITY",
-        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    },
-    {
-        "id": "mock_004",
-        "url": "https://x.com/AudioEngineerPro/status/mock_004",
-        "author": "AudioEngineerPro",
-        "text": "Shure SM7B vs Rode PodMic USB — I've recorded 400+ podcast episodes on both. Here's the honest breakdown nobody gives you. Thread incoming.",
-        "metrics": {"likes": 1204, "replies": 88},
-        "type": "TREND_ALERT",
-        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    },
-    {
-        "id": "mock_005",
-        "url": "https://x.com/RemoteRecorder/status/mock_005",
-        "author": "RemoteRecorder",
-        "text": "Anyone using the Rode Wireless Pro for interview work? Wondering if the onboard recording actually saves you when the receiver drops signal?",
-        "metrics": {"likes": 8, "replies": 1},
-        "type": "OPPORTUNITY",
-        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    },
-]
 
 class SpyAgent:
     def __init__(self):
+        self.apify_token   = os.getenv("APIFY_API_TOKEN")
         self.today         = datetime.now().strftime("%Y-%m-%d")
-        self.data_dir      = "data"
-        self.raw_data_file = os.path.join(self.data_dir, f"raw_tweets_{self.today}.json")
+        self.seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        self.output_file   = f"data/raw_tweets_{self.today}.json"
 
-        settings_path = "data/target_settings.json"
+        self.competitors   = self._load_competitors()
+
+        # ✅ CORRECT actor ID (tweet-scraper, not twitter-scraper-lite)
+        self.actor_url = (
+            "https://api.apify.com/v2/acts/apidojo~tweet-scraper"
+            "/run-sync-get-dataset-items"
+            f"?token={self.apify_token}&timeout=120&memory=256"
+        )
+
+    def _load_competitors(self):
         try:
-            with open(settings_path, "r") as f:
-                settings = json.load(f)
-                self.keywords = settings.get("keywords", [])
-                print(f"[OK] Loaded {len(self.keywords)} keywords: {self.keywords}")
+            with open("config/brand_voice.json", "r") as f:
+                config = json.load(f)
+            competitors = config.get("competitor_accounts", [])
+            print(f"[SPY] Loaded {len(competitors)} competitors: {competitors}")
+            return competitors
         except FileNotFoundError:
-            print("[WARN] target_settings.json not found. Using defaults.")
-            self.keywords = ["podcast mic"]
+            print("[WARN] brand_voice.json not found. Using defaults.")
+            return ["podcastage", "therecordingrevolution"]
 
-        # Only import Apify if we're going live — avoids crashes when token is missing
-        self._apify_ready = False
-        apify_token = os.getenv("APIFY_API_TOKEN")
-        if apify_token:
-            try:
-                from apify_client import ApifyClient
-                self.client   = ApifyClient(apify_token)
-                self.actor_id = ACTOR_ID
-                self._apify_ready = True
-            except ImportError:
-                print("[WARN] apify_client not installed. Mock mode only.")
+    def run(self, mock_mode=True):
+        print(f"[SPY] Spy Agent active. Target window: {self.seven_days_ago} → {self.today}")
 
-    def _normalize(self, item: dict) -> dict:
-        author_obj = item.get("author", item.get("user", {}))
-        return {
-            "id":         str(item.get("id", item.get("tweet_id", ""))),
-            "text":       item.get("text", item.get("full_text", "")),
-            "likes":      item.get("likeCount",  item.get("favorite_count", item.get("likes", 0))),
-            "replies":    item.get("replyCount", item.get("reply_count",    item.get("replies", 0))),
-            "author":     author_obj.get("userName", author_obj.get("screen_name", "unknown")),
-            "created_at": item.get("createdAt",  item.get("created_at", "")),
-        }
-
-    def fetch_market_chatter(self, mock_mode=False):
-        """
-        mock_mode=True  → uses built-in mock data (no Apify credits consumed)
-        mock_mode=False → calls Apify live (requires paid plan + credits)
-        """
         if mock_mode:
-            return self._fetch_mock()
-        return self._fetch_live()
+            print("[SPY] MOCK mode — using synthetic data.")
+            tweets = self._get_mock_data()
+        else:
+            tweets = self._fetch_live_data()
 
-    def _fetch_mock(self):
-        print("[SPY] Running in MOCK MODE -- no Apify credits consumed.")
-        print(f"[SPY] Injecting {len(MOCK_INTEL)} realistic mock tweets...")
-        self._save_intel(MOCK_INTEL)
-        return MOCK_INTEL
+        self._save(tweets)
+        return tweets
 
-    def _fetch_live(self):
-        if not self._apify_ready:
-            print("[FAIL] Apify client not ready. Check APIFY_API_TOKEN in .env")
-            self._save_intel([])
+    # ─────────────────────────────────────────────────────
+    # LIVE FETCHING
+    # ─────────────────────────────────────────────────────
+    def _fetch_live_data(self):
+        if not self.apify_token:
+            print("[FAIL] APIFY_API_TOKEN missing. Cannot run live mode.")
             return []
 
-        print(f"[SPY] LIVE MODE -- Scanning: {self.keywords}")
+        all_tweets = []
+        for account in self.competitors:
+            print(f"[SPY] Scraping @{account} (last 7 days)...")
+            tweets = self._scrape_account(account)
+            enriched = self._enrich_with_comments(tweets)
+            all_tweets.extend(enriched)
+            reply_count = sum(len(t.get("raw_replies", [])) for t in enriched)
+            print(f"[SPY] @{account}: {len(tweets)} posts, {reply_count} comments fetched")
 
-        run_input = {
-            "searchTerms":        self.keywords,
-            "sort":               "Latest",
-            "maxItems":           50,
-            "includeSearchTerms": True,
-            "onlyImage":          False,
-            "onlyVideo":          False,
-            "onlyVerifiedUsers":  False,
-            "tweetLanguage":      "en",
+        print(f"[SPY] Total: {len(all_tweets)} posts across {len(self.competitors)} accounts.")
+        return all_tweets
+
+    def _scrape_account(self, username):
+        """
+        Scrape tweets from one account using apidojo~tweet-scraper.
+
+        ✅ Correct input format:
+          twitterHandles: list of handles (no @)
+          maxItems:       max tweets to return
+          sort:           "Latest" (not queryType)
+          start:          date filter (since:)
+        """
+        payload = {
+            "twitterHandles": [username],
+            "maxItems":       50,
+            "sort":           "Latest",
+            "start":          self.seven_days_ago,   # only posts from last 7 days
+            "tweetLanguage":  "en",
         }
 
-        collected_intel = []
         try:
-            print("[SPY] Scraping in progress. This may take 1-2 minutes...")
-            run = self.client.actor(self.actor_id).call(run_input=run_input)
+            response = requests.post(
+                self.actor_url,
+                json=payload,
+                timeout=130,
+                headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            raw = response.json()
 
-            if not run or "defaultDatasetId" not in run:
-                print("[FAIL] Apify run returned no dataset.")
-                self._save_intel([])
-                return []
-
-            items = list(self.client.dataset(run["defaultDatasetId"]).iterate_items())
-            print(f"[SPY] Raw items received: {len(items)}")
-
-            noise_count = 0
-            for item in items:
-                n = self._normalize(item)
-                is_viral    = n["likes"] >= TREND_ALERT_LIKES or n["replies"] >= TREND_ALERT_REPLIES
-                is_question = "?" in n["text"]
-
-                intel_type = "NOISE"
-                if is_viral:      intel_type = "TREND_ALERT"
-                elif is_question: intel_type = "OPPORTUNITY"
-
-                if intel_type != "NOISE":
-                    collected_intel.append({
-                        "id":        n["id"],
-                        "url":       f"https://x.com/{n['author']}/status/{n['id']}",
-                        "author":    n["author"],
-                        "text":      n["text"],
-                        "metrics":   {"likes": n["likes"], "replies": n["replies"]},
-                        "type":      intel_type,
-                        "timestamp": n["created_at"],
-                    })
-                else:
-                    noise_count += 1
-
-            print(f"[SPY] Results: {len(collected_intel)} actionable, {noise_count} noise")
-
+            return [
+                {
+                    "id":          item.get("id", ""),
+                    "author":      username,
+                    "text":        item.get("text", ""),
+                    "created_at":  item.get("createdAt", ""),
+                    "likes":       item.get("likeCount", 0),
+                    "retweets":    item.get("retweetCount", 0),
+                    "replies":     item.get("replyCount", 0),
+                    "views":       item.get("viewCount", 0),
+                    "media_urls":  [m.get("url", "") for m in item.get("media", []) if m.get("url")],
+                    "has_images":  any(m.get("type") == "photo" for m in item.get("media", [])),
+                    "type":        "TREND_ALERT" if item.get("likeCount", 0) > 100 else "OPPORTUNITY",
+                    "raw_replies": [],
+                }
+                for item in raw
+                if isinstance(item, dict) and not item.get("noResults")
+            ]
         except Exception as e:
-            print(f"[FAIL] Apify scraper error: {type(e).__name__}: {e}")
-            self._save_intel([])
+            print(f"[FAIL] Could not scrape @{username}: {e}")
             return []
 
-        self._save_intel(collected_intel)
-        return collected_intel
+    def _enrich_with_comments(self, tweets, max_comments=3):
+        """Fetch reply threads for the top 3 highest-engagement posts."""
+        if not tweets:
+            return tweets
 
-    def _save_intel(self, data: list):
-        os.makedirs(self.data_dir, exist_ok=True)
+        top_ids = {
+            t["id"] for t in sorted(
+                tweets,
+                key=lambda t: t.get("likes", 0) + t.get("replies", 0),
+                reverse=True
+            )[:3]
+        }
 
-        existing_data = []
-        if os.path.exists(self.raw_data_file):
-            with open(self.raw_data_file, "r") as f:
-                existing_data = json.load(f)
+        for tweet in tweets:
+            if tweet["id"] not in top_ids or not tweet["id"]:
+                continue
 
-        existing_ids = {item["id"] for item in existing_data}
-        new_items    = [item for item in data if item["id"] not in existing_ids]
-        merged       = existing_data + new_items
+            # ✅ Correct field: conversationIds (not searchTerms with conversation_id:)
+            payload = {
+                "conversationIds": [tweet["id"]],
+                "maxItems":        max_comments,
+                "sort":            "Latest",
+            }
 
-        with open(self.raw_data_file, "w") as f:
-            json.dump(merged, f, indent=4)
+            try:
+                response = requests.post(
+                    self.actor_url, json=payload, timeout=130,
+                    headers={"Content-Type": "application/json"}
+                )
+                response.raise_for_status()
+                raw_replies = response.json()
 
-        print(f"[SAVED] {len(merged)} total items -> {self.raw_data_file} (+{len(new_items)} new)")
+                tweet["raw_replies"] = [
+                    {
+                        "author": r.get("author", {}).get("userName", "unknown"),
+                        "text":   r.get("text", ""),
+                        "likes":  r.get("likeCount", 0),
+                    }
+                    for r in raw_replies
+                    if isinstance(r, dict) and r.get("id") != tweet["id"] and not r.get("noResults")
+                ]
+            except Exception as e:
+                print(f"[WARN] Could not fetch comments for tweet {tweet['id']}: {e}")
+
+        return tweets
+
+    # ─────────────────────────────────────────────────────
+    # MOCK DATA
+    # ─────────────────────────────────────────────────────
+    def _get_mock_data(self):
+        return [
+            {
+                "id": "1001", "author": "podcastage",
+                "text": "The Rode PodMic is the best value dynamic mic for podcasting right now. Better rejection than the SM7B at 1/3 the price. Change my mind.",
+                "created_at": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "likes": 847, "retweets": 203, "replies": 91, "views": 45200,
+                "media_urls": [], "has_images": False, "type": "TREND_ALERT",
+                "raw_replies": [
+                    {"author": "user_mike", "text": "But does it need a cloudlifter with a Scarlett 2i2?", "likes": 34},
+                    {"author": "user_sarah", "text": "What interface are you pairing it with?", "likes": 22},
+                ],
+            },
+            {
+                "id": "1002", "author": "podcastage",
+                "text": "USB vs XLR mics: stop framing this as a quality debate. It's a workflow debate. USB for simplicity. XLR for control. Neither is universally better.",
+                "created_at": (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "likes": 1240, "retweets": 398, "replies": 156, "views": 78300,
+                "media_urls": ["https://example.com/mock_image.jpg"], "has_images": True,
+                "type": "TREND_ALERT",
+                "raw_replies": [
+                    {"author": "user_james", "text": "Can you compare Blue Yeti vs SM7B?", "likes": 67},
+                    {"author": "user_newbie", "text": "What USB mic for under $100?", "likes": 45},
+                ],
+            },
+            {
+                "id": "1003", "author": "therecordingrevolution",
+                "text": "Your home studio recording sounds bad because of the room, not the gear. I cannot stress this enough.",
+                "created_at": (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "likes": 2100, "retweets": 876, "replies": 203, "views": 125000,
+                "media_urls": [], "has_images": False, "type": "TREND_ALERT",
+                "raw_replies": [
+                    {"author": "user_acoustic", "text": "How much acoustic foam for a 10x12 room?", "likes": 88},
+                    {"author": "user_budget", "text": "Any treatment options under $50?", "likes": 72},
+                ],
+            },
+            {
+                "id": "1004", "author": "therecordingrevolution",
+                "text": "Gain staging is the most underrated skill in home recording. Get it wrong and no plugin will fix it.",
+                "created_at": (datetime.now() - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "likes": 445, "retweets": 112, "replies": 38, "views": 22400,
+                "media_urls": [], "has_images": False, "type": "OPPORTUNITY",
+                "raw_replies": [
+                    {"author": "user_newpro", "text": "Can you explain gain staging in simple terms?", "likes": 15},
+                ],
+            },
+            {
+                "id": "1005", "author": "podcastage",
+                "text": "Condenser vs dynamic mic for podcasting — the answer depends entirely on your room, not your budget.",
+                "created_at": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "likes": 678, "retweets": 167, "replies": 89, "views": 34100,
+                "media_urls": ["https://example.com/condenser_dynamic.jpg"], "has_images": True,
+                "type": "TREND_ALERT",
+                "raw_replies": [
+                    {"author": "user_musician", "text": "What about for music recording specifically?", "likes": 41},
+                    {"author": "user_streamer", "text": "I stream in a noisy apartment. Dynamic or condenser?", "likes": 37},
+                ],
+            },
+        ]
+
+    def _save(self, tweets):
+        os.makedirs("data", exist_ok=True)
+        with open(self.output_file, "w", encoding="utf-8") as f:
+            json.dump(tweets, f, indent=4, ensure_ascii=False)
+        print(f"[SAVED] {len(tweets)} tweets → {self.output_file}")
 
 
 if __name__ == "__main__":
-    agent = SpyAgent()
-    agent.fetch_market_chatter(mock_mode=True)
+    import sys
+    SpyAgent().run(mock_mode="--live" not in sys.argv)
