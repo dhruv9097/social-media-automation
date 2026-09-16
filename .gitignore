@@ -16,3 +16,4 @@ social-manager-ui/.next/
 
 # Data (Optional: keeps your repo lightweight and prevents pushing mock/live data)
 data/*.json
+.venv/

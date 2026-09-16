@@ -6,9 +6,8 @@
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Gemini](https://img.shields.io/badge/Gemini_Vision-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)
-![BeautifulSoup](https://img.shields.io/badge/BeautifulSoup-43B02A?style=flat-square&logo=python&logoColor=white)
-![Pandas](https://img.shields.io/badge/Pandas-150458?style=flat-square&logo=pandas&logoColor=white)
-![Next.js](https://img.shields.io/badge/Next.js_UI-000000?style=flat-square&logo=nextdotjs&logoColor=white)
+![Apify](https://img.shields.io/badge/Apify-FF9013?style=flat-square&logo=apify&logoColor=white)
+![Pollinations](https://img.shields.io/badge/Pollinations.ai-8E75B2?style=flat-square&logo=data:image/svg+xml;base64,&logoColor=white)
 
 </div>
 
@@ -30,7 +29,7 @@ python main.py --reset    # wipe quota state, then run live
 
 | # | Agent | Job |
 |---|---|---|
-| 1 | **Spy** | 7-day competitor scrape — posts *and* comment threads |
+| 1 | **Spy** | 7-day competitor scrape via the Apify `apidojo/tweet-scraper` actor — posts *and* reply threads |
 | 2 | **Auditor** | Deep competitive analysis, content-gap detection, flags image posts |
 | 3 | **Image Analyst** | Reads competitor image posts through the **Gemini Vision API** |
 | 4 | **Trend Hijack** | Scores world trends; drafts posts only for trends scoring ≥ 7 |
@@ -81,19 +80,30 @@ social-manager-ui/                 # Next.js dashboard for reviewing drafts
 ```bash
 pip install -r requirements.txt
 
-cp .env.example .env               # add GEMINI_API_KEY for live mode
-python main.py                     # mock run — no keys needed
-
-cd social-manager-ui && npm install && npm run dev   # review dashboard
+python main.py                     # mock run — needs no credentials at all
 ```
 
-Mock mode needs no credentials at all, so you can see the full pipeline before deciding
-whether to wire up keys.
+For a live run, create a `.env`:
+
+```bash
+GEMINI_API_KEY=...                 # aistudio.google.com — free tier
+APIFY_API_TOKEN=...                # apify.com — powers the Spy agent's scraping
+```
+
+```bash
+python main.py --live
+```
+
+Mock mode needs no credentials, so you can watch the whole pipeline run before deciding
+whether to wire up keys. Image generation via Pollinations.ai needs no key either.
+
+> The review dashboard (`social-manager-ui`) is a separate Next.js project and is not
+> included in this repository.
 
 ## Stack
 
-`Python` · `Gemini Vision API` · `Pollinations.ai` · `BeautifulSoup` · `Pandas` · `Tweepy`
-· `python-dotenv` · `schedule` · `Next.js` (review UI)
+`Python` · `google-genai` (Gemini 2.x, incl. Vision) · `Apify` · `Pollinations.ai` · `requests`
+· `python-dotenv`
 
 ---
 

@@ -1,4 +1,3 @@
-tweepy
-pandas
-python-dotenv
-schedule
+requests>=2.32.0
+python-dotenv>=1.0.0
+google-genai>=1.0.0
